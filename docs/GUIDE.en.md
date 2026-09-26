@@ -2,17 +2,17 @@
 
 > Home: [English](../README.en.md) · [简体中文](../README.md) · Guide: [English](GUIDE.en.md) · [中文](GUIDE.md)
 
-DeepSeek Harness auto-approval gate plugin v0.5.0: **minimal human intervention — only operations that must be confirmed go to a human (fail-safe)**.
+DeepSeek Harness auto-approval gate plugin v0.5.2-teddy.1: **minimal human intervention — only operations that must be confirmed go to a human (fail-safe)**.
 
 When a session's permission preset is `auto-approve` (Auto Approval (Flash)), every approval request (sandbox escalation) is judged through this pipeline:
 
 ```
-DENY (irreversible keywords) → allowlist (deterministic rules) → denyRules (rejected upgrades) → flash (SAFE / hard categories / neutral confirmation) → learned persistence
+DENY (irreversible keywords) → denyRules (rejected upgrades) → allowlist (deterministic rules) → flash (SAFE / hard categories / neutral confirmation) → learned persistence
 ```
 
 - **① DENY layer**: irreversible keywords (`rm -rf`, `drop table`, `force push`, formatting, …) → human (**highest priority, fail-safe**)
-- **② Allowlist layer**: a matching rule → auto-approve (deterministic, no LLM). Default rule `{mode:"workspace-write"}` — workspace writes (recoverable) auto-approve; `tool/mode/category/contains` combinations are supported (including learned rules)
-- **③ denyRules layer**: `tool+mode+category` pairs the user has **explicitly rejected** → permanently human (never auto-approve what the user refused)
+- **② denyRules layer**: a previously rejected action goes to a human first; tool, mode, and operation fingerprint match independently of the model's later category
+- **③ Allowlist layer**: a matching rule → auto-approve (deterministic, no LLM). Default rule `{mode:"workspace-write"}` — workspace writes (recoverable) auto-approve; `tool/mode/category/contains` combinations are supported (including learned rules)
 - **④ flash judgment** (escalations only): outputs `SAFE` or `RISKY:<category>`
   - `SAFE` → auto-approve
   - Hard-risk categories (`deletion` / `credential` / `remote` / `system` / `bulk`) → **directly human** (must confirm; no counting, no learning)
@@ -31,7 +31,7 @@ DENY (irreversible keywords) → allowlist (deterministic rules) → denyRules (
 
 ```sh
 # Option 1: npm (recommended)
-dsh plugin --profile web add dsh-approval-gate
+dsh plugin --profile web add "github:teddyli18000/dsh-approval-gate#main"
 
 # Option 2: GitHub
 dsh plugin --profile web add "github:moon09300731/dsh-approval-gate#main"
@@ -114,8 +114,8 @@ A new "Auto Approval" section in the DSH settings panel (`settings.section`, sty
 - **Setup card**: detects whether the `auto-approve` permission preset exists in `cordis.patch.yml`; if missing, click "Configure" to write it automatically (text-level edit, comments preserved), effective after restart
 - **Pipeline overview**: judgment pipeline + active hard-risk category badges
 - **① DENY · deny list** (`denyKeywords`): view/add/remove dangerous keywords (removing a predefined keyword asks for confirmation)
-- **② Allow list** (`allowRules`): view (tagged predefined / learned / user) / add (tool/mode/category/contains form) / remove — e.g. `tool=edit, mode=danger-full-access` auto-approves out-of-workspace edits
-- **③ denyRules · always-human**: rejection-upgraded rules, view/remove
+- **② denyRules · always-human**: rejection-upgraded rules take priority over allow rules; view/remove
+- **③ Allow list** (`allowRules`): view (tagged predefined / learned / user) / add (tool/mode/category/contains form) / remove — e.g. `tool=edit, mode=danger-full-access` auto-approves out-of-workspace edits
 - **④ Flash · thresholds & timeout**: edit `riskyThreshold` (auto-approve starts at N+1th occurrence after N confirmations) / `judgeTimeoutMs` directly
 - **⑤ Learning · in progress**: confirmation counts (n/N) + samples with a **"Stop" button** to intervene (removes count and samples, restarts learning)
 
@@ -154,7 +154,7 @@ Neutral confirmation learning: each human approval of the same tool|mode|categor
 
 ## Security Design
 
-1. **DENY layer highest priority**: irreversible keywords go to human with zero model calls and zero false negatives
+1. **DENY and user rejection rules take priority**: matching actions go to a human, regardless of allow rules or a model's `SAFE` verdict
 2. **Hard-risk categories are always human**: `deletion`/`credential`/`remote`/`system`/`bulk` are never counted, learned, or covered by persisted rules
 3. **Learned rules carry category + operation fingerprint**: persisted rules are `{tool, mode, category, contains}` (contains = a fingerprint you confirmed); only the same fingerprint auto-approves. When the fingerprint misses, flash does **semantic similarity verification** against your confirmed samples — DIFFERENT or verification failure always goes to human; rejected operations upgrade to denyRules (with fingerprint; without one, the whole kind is blocked), never auto-approved
 4. **Fail-safe**: flash failure, timeout (20s × 2 attempts), or unparseable output → neutral degradation or human; hard risks are never auto-approved

@@ -742,7 +742,7 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'ag-set-card-head' },
             React.createElement('div', { className: 'ag-set-card-title' }, '当前判定管道'),
             React.createElement('p', { className: 'ag-set-card-sub' },
-              '每次沙箱越界按下述链路判定，下面的配置卡片按管道顺序排列：')),
+              '每次沙箱越界按 DENY → 拒绝规则 → 白名单 → Flash → 学习判定；拒绝规则优先于自动放行：')),
           React.createElement('div', { className: 'ag-set-grid' },
             (cfg.hardCategories || []).map(function (c) {
               const isPre = preHard.has(c)
@@ -794,10 +794,10 @@ window.__ModuleLoader__.load({
         React.createElement('div', { className: 'ag-set-card' },
           React.createElement('div', { className: 'ag-set-card-head' },
             React.createElement('div', { className: 'ag-set-card-title' },
-              React.createElement('span', { className: 'ag-set-stage' }, '② 白名单层'),
+              React.createElement('span', { className: 'ag-set-stage' }, '③ 白名单层'),
               '白名单 · 自动放行规则'),
             React.createElement('p', { className: 'ag-set-card-sub' },
-              '管道第二步：命中规则直接自动放行（不过 Flash）。示例：tool=edit + mode=danger-full-access → 所有工作区外 edit 自动放行。')),
+              '管道第三步：未命中拒绝规则时，白名单直接自动放行（不过 Flash）。示例：tool=edit + mode=danger-full-access → 所有工作区外 edit 自动放行。')),
           React.createElement('div', { className: 'ag-set-row' },
             React.createElement('input', { className: 'ag-set-input', style: { width: 110 }, placeholder: 'tool', value: newRule.tool, onChange: function (e) { setNewRule(Object.assign({}, newRule, { tool: e.target.value })) } }),
             React.createElement('input', { className: 'ag-set-input', style: { width: 150 }, placeholder: 'mode（可选）', value: newRule.mode, onChange: function (e) { setNewRule(Object.assign({}, newRule, { mode: e.target.value })) } }),
@@ -842,10 +842,10 @@ window.__ModuleLoader__.load({
         React.createElement('div', { className: 'ag-set-card' },
           React.createElement('div', { className: 'ag-set-card-head' },
             React.createElement('div', { className: 'ag-set-card-title' },
-              React.createElement('span', { className: 'ag-set-stage' }, '③ denyRules 层'),
+              React.createElement('span', { className: 'ag-set-stage' }, '② denyRules 层'),
               '永久人工 · 拒绝升级规则'),
             React.createElement('p', { className: 'ag-set-card-sub' },
-              '管道第三步：neutral 操作被你拒绝后自动升级到这里，命中直接转人工（永不自动放行）。硬风险类别（删除/凭据/远程/系统/批量）本身永久人工，不在此记录。可手动移除。')),
+              '管道第二步：neutral 操作被你拒绝后自动升级到这里，命中直接转人工，优先于白名单和 Flash。硬风险类别（删除/凭据/远程/系统/批量）本身永久人工，不在此记录。可手动移除。')),
           (cfg.denyRules || []).length === 0
             ? React.createElement('div', { className: 'ag-set-empty' }, '无升级规则（硬风险类别本就永久人工，不在此记录）')
             : React.createElement('div', { className: 'ag-set-list' },

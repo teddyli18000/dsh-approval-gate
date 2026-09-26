@@ -2,17 +2,17 @@
 
 > 首页：[简体中文](../README.md) · [English](../README.en.md) · 指南：[中文](GUIDE.md) · [English](GUIDE.en.md)
 
-DeepSeek Harness 自动审批门控插件 v0.5.0：**最小人工介入，只把必须人工确认的操作转人工（fail-safe）**。
+DeepSeek Harness 自动审批门控插件 v0.5.2-teddy.1：**最小人工介入，只把必须人工确认的操作转人工（fail-safe）**。
 
 当会话的权限预设为 `auto-approve`（自动审批（Flash））时，每次审批请求（沙箱越界）按管道判定：
 
 ```
-DENY（不可逆危险词）→ 白名单（确定性规则）→ denyRules（裁决拒绝升级）→ flash（SAFE / 硬类别 / 中立确认）→ 学习沉淀
+DENY（不可逆危险词）→ denyRules（裁决拒绝升级）→ 白名单（确定性规则）→ flash（SAFE / 硬类别 / 中立确认）→ 学习沉淀
 ```
 
 - **① DENY 层**：`rm -rf` / `drop table` / `force push` / 格式化等不可逆危险词命中 → 转人工（**最高优先，fail-safe**）
-- **② 白名单层**：命中规则 → 直接放行（确定性，不过 LLM）。默认规则 `{mode:"workspace-write"}` —— 工作区写入（可回补）自动放行；也支持 `tool/mode/category/contains` 组合规则（含学习沉淀的规则）
-- **③ denyRules 层**：此前用户**裁决拒绝**过的「工具+模式+类别」→ 永久转人工（不会自动放行用户明确拒绝过的操作）
+- **② denyRules 层**：此前用户**裁决拒绝**过的操作 → 优先转人工；匹配工具、模式、操作指纹，不依赖之后模型给出的类别
+- **③ 白名单层**：命中规则 → 直接放行（确定性，不过 LLM）。默认规则 `{mode:"workspace-write"}` —— 工作区写入（可回补）自动放行；也支持 `tool/mode/category/contains` 组合规则（含学习沉淀的规则）
 - **④ flash 判定**（仅越界请求）：输出 `SAFE` 或 `RISKY:<category>`
   - `SAFE` → 自动放行
   - 硬风险类别（`deletion` 删除 / `credential` 凭据 / `remote` 远程生产 / `system` 系统路径 / `bulk` 批量不可回补）→ **直接转人工**（必须人工确认，不计数、不学习）
@@ -30,11 +30,8 @@ DENY（不可逆危险词）→ 白名单（确定性规则）→ denyRules（�
 ## 安装
 
 ```sh
-# 方式一：npm 安装（推荐）
-dsh plugin --profile web add dsh-approval-gate
-
-# 方式二：GitHub 安装
-dsh plugin --profile web add "github:moon09300731/dsh-approval-gate#main"
+# 从本仓库安装（private 仓库需先配置 GitHub 访问权限）
+dsh plugin --profile web add "github:teddyli18000/dsh-approval-gate#main"
 ```
 
 ## ⚠️ 安装后必须手动配置权限预设（关键步骤）
@@ -114,8 +111,8 @@ DSH 设置面板新增「自动审批」分区（settings.section，样式与 DS
 - **初始化卡片**：检测 `cordis.patch.yml` 是否已含 auto-approve 权限预设；未配置时点「一键配置」自动写入（文本级修改，保留注释格式），重启后生效
 - **管道总览**：判定链路 + 生效的硬风险类别徽标
 - **① DENY 层 · 黑名单**（denyKeywords）：查看/添加/删除危险词（删除预置词有确认提示）
-- **② 白名单层 · 白名单**（allowRules）：查看（预置/学习沉淀/用户 来源标签）/添加（tool/mode/category/contains 表单）/删除 —— 例：`tool=edit, mode=danger-full-access` → 工作区外 edit 自动放行
-- **③ denyRules 层 · 永久人工**：拒绝升级的规则，查看/移除
+- **② denyRules 层 · 永久人工**：拒绝升级的规则，优先于白名单，查看/移除
+- **③ 白名单层 · 白名单**（allowRules）：查看（预置/学习沉淀/用户 来源标签）/添加（tool/mode/category/contains 表单）/删除 —— 例：`tool=edit, mode=danger-full-access` → 工作区外 edit 自动放行
 - **④ Flash 判定 · 阈值与超时**：`riskyThreshold`（学习满 N 次后第 N+1 次自动放行）/ `judgeTimeoutMs` 直接修改
 - **⑤ 学习沉淀 · 正在学习**：展示确认计数（n/N）与样本；**「终止」按钮可介入删除**（删除计数与样本，重新学习）
 
@@ -154,7 +151,7 @@ DSH 设置面板新增「自动审批」分区（settings.section，样式与 DS
 
 ## 安全设计
 
-1. **DENY 层最高优先**：不可逆危险词命中即转人工，不消耗模型调用、无误判
+1. **DENY 与用户拒绝规则优先**：命中即转人工，不会被白名单或模型的 `SAFE` 覆盖
 2. **硬风险类别永远人工**：`deletion`/`credential`/`remote`/`system`/`bulk` 不计数、不学习、不可被沉淀规则覆盖
 3. **学习规则带类别 + 操作指纹**：沉淀的是 `{tool, mode, category, contains}`（contains = 用户确认过的操作指纹），只放行同一指纹的操作；指纹未命中时由 flash **语义级同类验证**（基于用户确认样本判断操作意图是否同类），判 DIFFERENT/验证失败一律人工；拒绝过的操作升级 denyRules（带指纹，提取不到则拦全部同类），永不自动放行
 4. **fail-safe**：flash 调用失败、超时（20s×2 次尝试）、输出无法解析 → 一律按中立降级或转人工，绝不自动放行硬风险

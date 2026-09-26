@@ -21,6 +21,7 @@ then the global `@deepseek-ai/dsh` install, then npx caches. Override with
 | `03-gate-session-wiring.mjs` | the gate reads the Session correctly for B-layer files and `baseDir` | yes |
 | `04-flash-finish-no-reason.mjs` | a `finish` chunk without `reason` goes to human approval with an audit error | no |
 | `05-pr7-skip-audit-probe.mjs` | cost probe for PR #7's `SKIP` audit line (skips without the variant) | no |
+| `06-policy-precedence.mjs` | rejected actions override workspace allow rules; preset failures are audited | no |
 
 Run with node (v24):
 
@@ -30,6 +31,7 @@ node test/session-api/02-projection-crash.mjs
 node test/session-api/03-gate-session-wiring.mjs
 node test/session-api/04-flash-finish-no-reason.mjs
 node test/session-api/05-pr7-skip-audit-probe.mjs
+node test/session-api/06-policy-precedence.mjs
 ```
 
 On `12cd607` (pre-fix), 03 exits non-zero because the gate reads the wrong

@@ -37,12 +37,12 @@ Click a file in an approval record to open the diff dialog: a **unified diff** w
 
 ![Settings Auto-approval](docs/screenshots/settings-auto-approve.png)
 
-The "Auto-approval" section in Settings provides full configuration: **preset initialization** (one-click write of the `auto-approve` preset into `cordis.patch.yml`), **pipeline overview** (DENY → allowlist → denyRules → Flash → learning), **deny-keyword blacklist** (built-in entries + custom add), and hot-reload notes (changes take effect immediately, no restart).
+The "Auto-approval" section in Settings provides full configuration: **preset initialization** (one-click write of the `auto-approve` preset into `cordis.patch.yml`), **pipeline overview** (DENY → denyRules → allowlist → Flash → learning), **deny-keyword blacklist** (built-in entries + custom add), and hot-reload notes (changes take effect immediately, no restart).
 
 ## 🚀 Quick Start
 
 ```sh
-dsh plugin --profile web add dsh-approval-gate
+dsh plugin --profile web add "github:teddyli18000/dsh-approval-gate#main"
 ```
 
 1. **Add the permission preset**: append the `auto-approve` preset to `~/.dsh/profiles/web/cordis.patch.yml` ([see guide](docs/GUIDE.en.md#%E2%9A%A0%EF%B8%8F-manual-permission-preset-required-after-install))

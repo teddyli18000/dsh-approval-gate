@@ -2,7 +2,7 @@
  * dsh-approval-gate — 自动审批（多级判定）持久插件 v3
  *
  * 挂在审批瀑布（approval/request）最前：当会话权限预设为 auto-approve 时，
- * 按「DENY → 白名单 → denyRules → flash（SAFE/硬类别/中立计数）→ 裁决学习」管道判定越界请求。
+ * 按「DENY → denyRules → 白名单 → flash（SAFE/硬类别/中立计数）→ 裁决学习」管道判定越界请求。
  *
  * 设计目标：最小人工介入。人工只出现在两类场景：
  *   1. 必须人工确认：DENY 危险词、硬风险类别（deletion/credential/remote/system/bulk）
@@ -762,13 +762,13 @@ function parseReason(reason) {
 }
 
 // 规则匹配：tool / mode / category / contains 均满足（缺省表示任意）
-function matchRule(rules, toolName, mode, category, justification) {
+function matchRule(rules, toolName, mode, category, justification, ignoreCategory = false) {
   const list = rules || []
   const j = String(justification || '').toLowerCase()
   for (const rule of list) {
     if (rule.tool && rule.tool !== toolName) continue
     if (rule.mode && rule.mode !== mode) continue
-    if (rule.category && rule.category !== category) continue
+    if (!ignoreCategory && rule.category && rule.category !== category) continue
     if (rule.contains && !j.includes(String(rule.contains).toLowerCase())) continue
     return rule
   }
@@ -1461,6 +1461,7 @@ export default {
           preset = permissionPresets.current(session)
         } catch (error) {
           console.error(`[${NAME}] permissionPresets.current failed`, error)
+          audit(`FAILED  preset lookup ${String(req.toolName || 'unknown')} → 人工 | ${errText(error).slice(0, 200)}`)
           return next()
         }
         if (preset !== PRESET_NAME) return next()
@@ -1503,7 +1504,13 @@ export default {
           return forwardToHuman(sessionId, toolName, mode, reason, justification, '', 'deny')
         }
 
-        // 2. 白名单层：命中规则 → 直接放行（确定性，不过 flash）
+        // 2. 用户拒绝规则优先于白名单与模型。拒绝不能被后续模型类别变化绕过。
+        if (matchRule(config.denyRules, toolName, mode, null, justification, true)) {
+          audit(`DENYRULE ${toolName} mode=${mode || 'none'} → 人工 | ${reason.slice(0, 120)}`)
+          return forwardToHuman(sessionId, toolName, mode, reason, justification, '', 'deny-rule')
+        }
+
+        // 3. 白名单层：命中规则 → 直接放行（确定性，不过 flash）
         const matchedRule = matchRule(config.allowRules, toolName, mode, null, justification)
         if (matchedRule) {
           audit(`ALLOW   ${toolName} mode=${mode || 'none'} (rule: ${matchedRule.description || 'matched'})`)
@@ -1511,7 +1518,7 @@ export default {
           return 'allowed-once'
         }
 
-        // 3. flash 判定
+        // 4. flash 判定
         const { verdict, category, timedOut, failed, error: judgeError } = await judgeWithFlash(toolName, mode, justification)
 
         if (verdict === 'safe') {
@@ -1540,12 +1547,6 @@ export default {
         if (cat !== 'neutral') {
           audit(`UNKNOWN ${toolName} mode=${mode || 'none'} category=${cat} → 人工 | ${reason.slice(0, 120)}`)
           return forwardToHuman(sessionId, toolName, mode, reason, justification, cat, 'unknown-category')
-        }
-
-        // 4d. denyRules 命中（此前用户裁决拒绝过的 key）→ 直接转人工（拒绝优先于沉淀）
-        if (matchRule(config.denyRules, toolName, mode, cat, justification)) {
-          audit(`DENYRULE ${toolName} mode=${mode || 'none'} category=${cat} → 人工 | ${reason.slice(0, 120)}`)
-          return forwardToHuman(sessionId, toolName, mode, reason, justification, cat, 'deny-rule')
         }
 
         // 4e. 沉淀规则（带 category 的学习规则，用户批准过）→ 直接放行，不再计数
@@ -1679,10 +1680,11 @@ export default {
         return outcome
       } catch (error) {
         console.error(`[${NAME}] 判断过程出错，回退人工`, error)
+        audit(`FAILED  approval handler ${String(req.toolName || 'unknown')} → 人工 | ${errText(error).slice(0, 200)}`)
         return next()
       }
     }, { prepend: true })
 
-    console.log(`[${NAME}] v3 已挂载：DENY→白名单→denyRules→flash(SAFE/硬类别/中立计数${config.riskyThreshold})→裁决学习（配置: ${ALLOWLIST_PATH}）`)
+    console.log(`[${NAME}] v3 已挂载：DENY→denyRules→白名单→flash(SAFE/硬类别/中立计数${config.riskyThreshold})→裁决学习（配置: ${ALLOWLIST_PATH}）`)
   },
 }
