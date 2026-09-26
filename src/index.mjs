@@ -1114,20 +1114,37 @@ export default {
      * 由 judgeOnce / verifySimilarity 共用；异常向上抛，由 withRetry 决定重试或降级。
      * @returns {Promise<string>} 模型原始输出文本
      */
-    const callFlash = async (userText, systemPrompt, signal) => {
-      const { provider, model } = resolveModel()
-      let text = ''
-      for await (const chunk of llm.stream({
+    // 思考档位：pi-ai 适配器只接受「模型声明过的」档位（未声明的在 thinkingLevelMap 里是 null），
+    // 写死 off 会让只声明 high/max 的模型在**发出请求之前**就抛 UNSUPPORTED_REASONING_EFFORT。
+    // 这里从最低档依次上探，取该模型声明的最低可用档，并按 provider/model 缓存结果。
+    const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+    const flashLevelCache = new Map()
+
+    const isUnsupportedEffort = (error) => Boolean(error) && (
+      error.code === 'UNSUPPORTED_REASONING_EFFORT' ||
+      /does not support reasoning effort/i.test(String(error.message || error))
+    )
+
+    const errText = (error) => {
+      if (!error) return ''
+      if (typeof error === 'string') return error
+      return String(error.message || error.code || error)
+    }
+
+    const callFlashOnce = async (provider, model, effort, userText, systemPrompt, signal) => {
+      const options = {
         provider,
         model,
         messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
         system: systemPrompt,
         temperature: 0,
-        reasoningEffort: 'off',
         // 256：结论仅几个词，但模型偶发先输出复述/思考文本，64 会被截断导致解析失败
         maxTokens: 256,
         signal
-      })) {
+      }
+      if (typeof effort === 'string') options.reasoningEffort = effort
+      let text = ''
+      for await (const chunk of llm.stream(options)) {
         if (chunk.type === 'text-delta') text += chunk.text
         else if (chunk.type === 'reasoning-delta') text += chunk.text
         else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
@@ -1136,6 +1153,29 @@ export default {
         }
       }
       return text
+    }
+
+    const callFlash = async (userText, systemPrompt, signal) => {
+      const { provider, model } = resolveModel()
+      const key = provider + '/' + model
+      const cached = flashLevelCache.get(key)
+      // 缓存档位走快路径；其余仍按从低到高兜底（模型或配置变了也能自愈）
+      const order = cached === undefined ? THINKING_LEVELS : [cached].concat(THINKING_LEVELS.filter((l) => l !== cached))
+      let lastError = null
+      for (const effort of order) {
+        try {
+          const text = await callFlashOnce(provider, model, effort, userText, systemPrompt, signal)
+          if (cached !== effort) {
+            flashLevelCache.set(key, effort)
+            console.warn(`[${NAME}] 判定思考档位 ${key} → ${effort}（该模型声明的最低可用档）`)
+          }
+          return text
+        } catch (error) {
+          if (!isUnsupportedEffort(error)) throw error
+          lastError = error
+        }
+      }
+      throw lastError || new Error('flash 调用失败: 没有可用的思考档位')
     }
 
     /**
@@ -1236,11 +1276,13 @@ export default {
         }
       }
 
+      let firstError = ''
       try {
         const first = await runOnce()
         if (!first.timedOut) return first
         console.warn(`[${NAME}] ${label} 超时(${timeoutMs}ms)，重试 1 次`)
       } catch (error) {
+        firstError = errText(error)
         console.error(`[${NAME}] ${label} 异常，重试 1 次`, error)
       }
       try {
@@ -1248,23 +1290,23 @@ export default {
         if (!second.timedOut) return second
       } catch (error) {
         console.error(`[${NAME}] ${label} 重试仍异常`, error)
-        return { failed: true }
+        return { failed: true, error: errText(error) || firstError }
       }
       console.warn(`[${NAME}] ${label} 两次超时(${timeoutMs}ms×2)`)
-      return { failed: true }
+      return { failed: true, error: (firstError ? firstError + ' | ' : '') + `两次超时(${timeoutMs}ms×2)` }
     }
 
-    /** flash 风险判定（带超时重试）：失败 → { verdict:'risky', category:'neutral', failed:true }（fail-safe） */
+    /** flash 风险判定（带超时重试）：失败 → { verdict:'risky', category:'neutral', failed:true, error }（fail-safe） */
     const judgeWithFlash = async (toolName, mode, justification) => {
       const result = await withRetry((signal) => judgeOnce(toolName, mode, justification, signal), 'flash 判断')
-      if (result.failed) return { verdict: 'risky', category: 'neutral', timedOut: true, failed: true }
+      if (result.failed) return { verdict: 'risky', category: 'neutral', timedOut: true, failed: true, error: result.error }
       return result
     }
 
-    /** 同类验证（带超时重试）：失败 → { verdict:'different', failed:true }（fail-safe：验证失败按不同类处理） */
+    /** 同类验证（带超时重试）：失败 → { verdict:'different', failed:true, error }（fail-safe：验证失败按不同类处理） */
     const verifySimilarityWithRetry = async (toolName, mode, justification, samples) => {
       const result = await withRetry((signal) => verifySimilarity(toolName, mode, justification, samples, signal), '同类验证')
-      if (result.failed) return { verdict: 'different', failed: true }
+      if (result.failed) return { verdict: 'different', failed: true, error: result.error }
       return result
     }
 
@@ -1287,7 +1329,7 @@ export default {
         if (!session) return next()
         let preset
         try {
-          preset = permissionPresets.current(session.events)
+          preset = permissionPresets.current(session)
         } catch (error) {
           console.error(`[${NAME}] permissionPresets.current failed`, error)
           return next()
@@ -1333,7 +1375,7 @@ export default {
         }
 
         // 3. flash 判定
-        const { verdict, category, timedOut, failed } = await judgeWithFlash(toolName, mode, justification)
+        const { verdict, category, timedOut, failed, error: judgeError } = await judgeWithFlash(toolName, mode, justification)
 
         if (verdict === 'safe') {
           audit(`ALLOW   ${toolName} mode=${mode || 'none'} (flash-safe${timedOut ? '，重试后' : ''})`)
@@ -1345,7 +1387,8 @@ export default {
 
         // 4a. flash 完全失败（超时×2/异常×2）→ 转人工（fail-safe：无法判断绝不自动放行）
         if (failed) {
-          audit(`FAILED  ${toolName} mode=${mode || 'none'} → 人工 | ${reason.slice(0, 120)}`)
+          const why = judgeError ? `${errText(judgeError).slice(0, 200)} || ` : ''
+          audit(`FAILED  ${toolName} mode=${mode || 'none'} → 人工 | ${why}${reason.slice(0, 120)}`)
           return forwardToHuman(sessionId, toolName, mode, reason, justification, cat, 'flash-failed')
         }
 
