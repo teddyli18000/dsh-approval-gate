@@ -167,9 +167,9 @@ DSH 设置面板新增「自动审批」分区（settings.section，样式与 DS
 ## 技术说明
 
 - 挂载于 `approval/request` 瀑布最前（`prepend: true`，先于 web answerer 接单）
-- 门控：`permissionPresets.current(session.events) === 'auto-approve'`
+- 门控：`permissionPresets.current(session) === 'auto-approve'`（注意传的是 **Session 对象**：该 API 内部走 `sessionProjections.stateOf(session,'permissions')`，传 `session.events` 会抛 `reading 'header'`）
 - DSH 审批触发点是沙箱越界，`reason` 固定为 `escalate sandbox to <mode>: <justification>`，`mode` 仅 `workspace-write` / `danger-full-access` 两级
-- flash 判定：`reasoningEffort: 'off'` + `maxTokens: 256`，输出 `SAFE` 或 `RISKY:<category>`
+- flash 判定：`maxTokens: 256`，从最低可用 `reasoningEffort` 档位探测；不支持显式档位时省略该参数。只读取正文的 `SAFE` 或 `RISKY:<category>`，`finish.reason` 缺失则转人工并记录错误。可用 `judgeModel: { provider, model }` 固定判定路由；未设置时跟随 agent 默认模型。
 - 超时兜底：`AbortController` 传入 `llm.stream` 的 signal（可取消底层请求），`Promise.race` + `ctx.timeout(judgeTimeoutMs)`，超时 abort 并重试 1 次
 - 同类验证：把当前操作背景/目的 + 用户确认样本交给 flash 语义判断（`SAME`/`DIFFERENT`），失败按 DIFFERENT 处理
 - 学习闭环：通过 waterfall 的 `next()` 返回值捕获人工裁决结果（`allowed-once` 沉淀 / `rejected` 升级）
