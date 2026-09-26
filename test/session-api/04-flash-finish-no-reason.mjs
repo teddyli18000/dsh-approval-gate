@@ -1,20 +1,13 @@
 /**
- * 04 — `finish` chunk without `reason`: is `chunk.reason.kind` at 12cd607 a real
- *      hazard on the flash-judgment path? (PR #10, src hunk 1.)
+ * 04 — A nonconforming `finish` chunk must fail closed on the flash path.
  *
- * `callFlashOnce` (src/index.mjs:1150) reads `chunk.reason.kind` unguarded. DSH's
- * `finish` chunk declares `reason` as optional, so a provider that omits it makes
- * the judgment fail with `TypeError: Cannot read properties of undefined
- * (reading 'kind')` — not a timeout — and `callFlash` rethrows any error that is
- * not `UNSUPPORTED_REASONING_EFFORT`, so `withRetry` exhausts both attempts and
- * the gate fail-safes to manual approval.
+ * DSH's StreamChunk contract requires `finish.reason`. If an adapter omits it
+ * after emitting SAFE, the gate must retry, then hand approval to a human and
+ * record a useful error instead of treating the incomplete stream as SAFE.
  *
  * The plugin is driven with a mock ctx whose `llm.stream` yields
  * `{type:'finish'}` with **no** `reason`, straight into the flash layer
  * (`danger-full-access`, so the default `workspace-write` allow rule cannot match).
- *
- * Expected on 12cd607: FAIL (verdict path = `flash-failed`, outcome = manual).
- * After PR #10's guard: PASS (`flash-safe`, auto-allowed).
  *
  * Run: node test/session-api/04-flash-finish-no-reason.mjs
  */
@@ -58,11 +51,11 @@ console.log(`outcome          = ${JSON.stringify(outcome)}\n`)
 
 checks.check('the flash layer was actually reached', llmCalls.length > 0, 'llm.stream was never called')
 checks.check(
-  'judgment survived a `finish` chunk with no `reason`',
-  outcome === 'allowed-once',
-  `outcome = ${JSON.stringify(outcome)} — the gate fell through to manual instead of auto-allowing`,
+  'missing finish.reason is retried, then handed to a human',
+  llmCalls.length === 2 && outcome === 'rejected',
+  `calls = ${llmCalls.length}, outcome = ${JSON.stringify(outcome)}`,
 )
-checks.check('gate did not fall through to next()', !nextCalled, 'next() was called')
+checks.check('the human approval handler was called', nextCalled, 'next() was not called')
 
 const audit = (() => { try { return readFileSync(join(DATA_DIR, 'audit.log'), 'utf8') } catch { return '' } })()
 const events = (() => {
@@ -72,14 +65,14 @@ const events = (() => {
 })()
 
 checks.check(
-  'audit.log shows a flash-safe ALLOW, not a flash failure',
-  /ALLOW\s+read .*flash-safe/.test(audit),
+  'audit.log records the adapter contract failure',
+  /FAILED\s+read .*finish\.reason 缺失/.test(audit),
   `audit.log =\n${audit.trim() || '(empty)'}`,
 )
 checks.check(
-  'no flash-failed fail-safe was recorded',
-  !events.some((e) => e.path === 'flash-failed'),
-  `events paths = ${JSON.stringify(events.map((e) => e.path))}`,
+  'manual events carry the failure reason and no auto approval is recorded',
+  events.length >= 2 && events.every((e) => e.path === 'flash-failed' && /finish\.reason 缺失/.test(e.judgeError || '')),
+  `events = ${JSON.stringify(events)}`,
 )
 
 checks.summary()

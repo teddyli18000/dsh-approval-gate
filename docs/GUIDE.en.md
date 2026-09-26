@@ -169,7 +169,7 @@ Neutral confirmation learning: each human approval of the same tool|mode|categor
 - Mounted at the front of the `approval/request` waterfall (`prepend: true`, before the web answerer)
 - Gate: `permissionPresets.current(session) === 'auto-approve'` (pass the **Session object**: the API reads `sessionProjections.stateOf(session,'permissions')` internally, so `session.events` throws `reading 'header'`)
 - DSH approval fires on sandbox escalation; `reason` is always `escalate sandbox to <mode>: <justification>`, with `mode` in `workspace-write` / `danger-full-access`
-- flash judgment: `reasoningEffort: 'off'` + `maxTokens: 256`, outputs `SAFE` or `RISKY:<category>`
+- Flash judgment: `maxTokens: 256`, probing the lowest supported `reasoningEffort` and omitting it if no explicit level is supported. Only response text can yield `SAFE` or `RISKY:<category>`; a missing `finish.reason` sends approval to a human and records the error. Set `judgeModel: { provider, model }` to pin the judge route; otherwise it follows the agent's default model.
 - Timeout: `AbortController` signal into `llm.stream` (cancellable), `Promise.race` + `ctx.timeout(judgeTimeoutMs)`, abort + one retry
 - Similarity verification: current operation context + confirmed samples to flash (`SAME`/`DIFFERENT`); failure counts as DIFFERENT
 - Learning loop: captures human verdicts through the waterfall `next()` return (`allowed-once` persists / `rejected` upgrades)

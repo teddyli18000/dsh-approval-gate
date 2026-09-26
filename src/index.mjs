@@ -1249,11 +1249,9 @@ export default {
         if (chunk.type === 'text-delta') text += chunk.text
         else if (chunk.type === 'reasoning-delta') reasoningText += chunk.text
         else if (chunk.type === 'finish') {
-          // 防御性读取：dsh-llm 的 StreamChunk 声明 finish.reason 为必需字段，但 llm.stream 是
-          // 任意 provider/适配器的边界；适配器不按契约发 chunk（第三方 provider 的 finish
-          // 不带 reason）时，直接读 chunk.reason.kind 会抛 TypeError，判定毫秒级失败、重试
-          // 同样失败，最终 fail-safe 全量转人工（门控等于失效）。kind 缺失按正常结束处理。
-          const kind = chunk.reason && chunk.reason.kind ? chunk.reason.kind : ''
+          // finish.reason 是流契约的必需字段。缺失时不能把此前的 SAFE 文本当成完整结论。
+          const kind = chunk.reason && chunk.reason.kind
+          if (!kind) throw new Error('flash 调用失败: finish.reason 缺失')
           if (kind === 'error' || kind === 'aborted') {
             const failure = chunk.reason.failure && chunk.reason.failure.message ? chunk.reason.failure.message : kind
             const error = new Error('flash 调用失败: ' + failure)
