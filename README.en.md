@@ -6,6 +6,8 @@
 
 A Flash model pre-judges every sandbox escalation: routine operations auto-approve, hard-risk operations (deletion / credentials / remote / system / bulk) always require human confirmation; learned rules only ever cover operations you confirmed, with an in-app human review UI.
 
+This repository is based on [moon09300731/dsh-approval-gate](https://github.com/moon09300731/dsh-approval-gate) 0.5.2 (commit `8419bc3`). It retains the upstream history and MIT license; `teddyli18000` maintains the changes in this repository.
+
 ## ✨ Features
 
 - ⚡ **Flash risk pre-judgment**: every sandbox escalation is judged by a Flash model (`SAFE` / `RISKY:<category>`); recoverable operations auto-approve
