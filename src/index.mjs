@@ -371,6 +371,9 @@ function recordApprovalEvent(sessionId, toolName, mode, reason, justification, v
   if (o.category) ev.category = o.category
   // path：判定路径标识（hard-category / unknown-category / deny-rule / deny / flash-failed / neutral-reject / neutral-confirm）
   if (o.path) ev.path = o.path
+  // judgeError：判定器不可用的原因（fail-safe 转人工时写入）。此前失败原因只进 console 与审计行，
+  // 事件行（审查 API /api/auto-approve/events 读的就是这份数据）里完全看不出来。
+  if (o.judgeError) ev.judgeError = String(o.judgeError).slice(0, 300)
   try {
     ensureDataDir()
     appendFileSync(EVENTS_PATH, JSON.stringify(ev) + '\n', 'utf8')
@@ -436,6 +439,7 @@ function getRulesSnapshot() {
       hardCategories: config.hardCategories || [],
       riskyThreshold: config.riskyThreshold || 3,
       judgeTimeoutMs: config.judgeTimeoutMs || 20000,
+      judgeModel: config.judgeModel || null,
       learning: { enabled: learning.enabled !== false }
     },
     learning: {
@@ -511,9 +515,27 @@ function ensureAutoApprovePreset() {
   }
 }
 
-/** 规则修改：op=add|remove|set，kind=allowRules|denyRules|denyKeywords|hardCategories|riskyThreshold|judgeTimeoutMs */
+/** 规则修改：op=add|remove|set，kind=allowRules|denyRules|denyKeywords|hardCategories|riskyThreshold|judgeTimeoutMs|judgeModel */
 function applyRuleOp(op, kind, value) {
   reloadConfig()
+
+  // 判定模型（judgeModel）：与 agent 自身模型解耦。value={provider,model}；null/'' = 清除（跟随 agent 默认模型）
+  if (kind === 'judgeModel') {
+    if (op !== 'set') return { ok: false, error: 'judgeModel 使用 set 操作' }
+    if (value === null || value === undefined || value === '') {
+      config.judgeModel = null
+      saveJson(ALLOWLIST_PATH, config)
+      audit('CONFIG  judgeModel → (跟随 agent 默认模型)')
+      return { ok: true, set: true, value: null }
+    }
+    const provider = value && typeof value.provider === 'string' ? value.provider.trim() : ''
+    const model = value && typeof value.model === 'string' ? value.model.trim() : ''
+    if (!provider || !model) return { ok: false, error: 'judgeModel 需要 provider 与 model' }
+    config.judgeModel = { provider, model }
+    saveJson(ALLOWLIST_PATH, config)
+    audit(`CONFIG  judgeModel → ${provider}/${model}`)
+    return { ok: true, set: true, value: config.judgeModel }
+  }
 
   // 数值类配置（阈值/超时）
   if (kind === 'riskyThreshold' || kind === 'judgeTimeoutMs') {
@@ -668,6 +690,14 @@ function normalizeConfig(raw) {
   cfg.riskyThreshold = cfg.riskyThreshold || 3
   cfg.judgeTimeoutMs = cfg.judgeTimeoutMs || 20000
   cfg.learning = cfg.learning || { enabled: true }
+  // judgeModel：判定路由（与 agent 自身模型解耦）。缺省/null = 跟随 agent 默认模型；
+  // 格式非法即丢弃——一条坏配置不能让判定器抛错（resolveModel 另有兜底）。
+  const jm = cfg.judgeModel
+  cfg.judgeModel = (jm && typeof jm === 'object'
+    && typeof jm.provider === 'string' && jm.provider.trim() !== ''
+    && typeof jm.model === 'string' && jm.model.trim() !== '')
+    ? { provider: jm.provider.trim(), model: jm.model.trim() }
+    : null
   return cfg
 }
 
@@ -896,6 +926,56 @@ export default {
       console.error(`[${NAME}] 注册规则/初始化 API 失败`, error)
     }
 
+    // ---- 模型目录 API（设置页「裁判模型」下拉框的数据源） ----
+    // 与 DSH 对话框右下角的模型选择器同源：直接问 llm 服务要各 provider 的模型目录。
+    // listProviders() 是同步方法，且只列出「已注册适配器」的路由（调不通的路由不会出现在设置页）；
+    // listModels(provider) 是异步的广告式目录。
+    let offModelsRoute = null
+    try {
+      if (ctx.webServer && typeof ctx.webServer.register === 'function') {
+        offModelsRoute = ctx.webServer.register({
+          kind: 'exact',
+          path: '/api/auto-approve/models',
+          handler: async (req, res) => {
+            const send = (code, obj) => {
+              res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' })
+              res.end(JSON.stringify(obj))
+            }
+            if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, { ok: false, error: 'method not allowed' })
+            try {
+              const providers = []
+              const raw = typeof llm.listProviders === 'function' ? llm.listProviders() : []
+              for (const p of Array.isArray(raw) ? raw : []) {
+                const id = typeof p === 'string' ? p : (p && typeof p.id === 'string' ? p.id : '')
+                if (!id) continue
+                let models = []
+                try {
+                  const list = await llm.listModels(id)
+                  models = (Array.isArray(list) ? list : [])
+                    .map((m) => ({
+                      id: String((m && m.id) || ''),
+                      name: String((m && m.name) || (m && m.id) || ''),
+                    }))
+                    .filter((m) => m.id !== '')
+                } catch (error) {
+                  console.warn(`[${NAME}] listModels(${id}) 失败`, error)
+                }
+                providers.push({ id, models })
+              }
+              return send(200, { ok: true, providers, current: config.judgeModel || null })
+            } catch (error) {
+              return send(200, { ok: false, error: String((error && error.message) || error), providers: [], current: config.judgeModel || null })
+            }
+          },
+        })
+        console.log(`[${NAME}] 模型目录 API 已注册：/api/auto-approve/models`)
+      } else {
+        console.warn(`[${NAME}] webServer 不可用，模型目录 API 未注册`)
+      }
+    } catch (error) {
+      console.error(`[${NAME}] 注册模型目录 API 失败`, error)
+    }
+
     // ---- diff / 撤销 / 快照管理 API ----
     let offDiffRoute = null
     let offRevertRoute = null
@@ -1097,9 +1177,20 @@ export default {
       if (offRevertRoute) { try { offRevertRoute() } catch (e) {} }
       if (offSnapStatsRoute) { try { offSnapStatsRoute() } catch (e) {} }
       if (offSnapClearRoute) { try { offSnapClearRoute() } catch (e) {} }
+      if (offModelsRoute) { try { offModelsRoute() } catch (e) {} }
     })
 
     const resolveModel = () => {
+      // ① 配置里钉住的判定路由（推荐）：判定器是安全组件，不应随日常切换模型漂移。
+      //    典型事故：agent 模型是多步工具循环（agy 一类），单次判定在 judgeTimeoutMs 内
+      //    永远跑不完 → 每次审批都 fail-safe 转人工，门控静默失效。
+      const jm = config.judgeModel
+      if (jm && typeof jm === 'object'
+        && typeof jm.provider === 'string' && jm.provider
+        && typeof jm.model === 'string' && jm.model) {
+        return { provider: jm.provider, model: jm.model }
+      }
+      // ② 否则跟随 agent 默认模型（向后兼容：未配置的部署行为完全不变）；③ 内置兜底
       try {
         const sel = agentDefaultModel && typeof agentDefaultModel.currentSelection === 'function'
           ? agentDefaultModel.currentSelection()
@@ -1126,7 +1217,9 @@ export default {
 
     const isUnsupportedEffort = (error) => Boolean(error) && (
       error.code === 'UNSUPPORTED_REASONING_EFFORT' ||
-      /does not support reasoning effort/i.test(String(error.message || error))
+      // dsh-llm 的 normalizeLlmFailure 会保留适配器原文，message 是主信号；
+      // 但中转/自定义适配器可能只带 code 或换个措辞，故 code 与两种文案都判。
+      /UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(String(error.message || error))
     )
 
     const errText = (error) => {
@@ -1148,9 +1241,13 @@ export default {
       }
       if (typeof effort === 'string') options.reasoningEffort = effort
       let text = ''
+      // 思考文本单独累加，绝不并入判定文本：judgeOnce 把整段文本 toUpperCase() 后做子串匹配，
+      // 思考里出现的 SAFE 会先于「无法判断」等不确定标记命中 → 正文明确说「无法判断」时仍返回
+      // safe 并自动放行（实测 test/judge/run.mjs S2a/S2b）。
+      let reasoningText = ''
       for await (const chunk of llm.stream(options)) {
         if (chunk.type === 'text-delta') text += chunk.text
-        else if (chunk.type === 'reasoning-delta') text += chunk.text
+        else if (chunk.type === 'reasoning-delta') reasoningText += chunk.text
         else if (chunk.type === 'finish') {
           // 防御性读取：dsh-llm 的 StreamChunk 声明 finish.reason 为必需字段，但 llm.stream 是
           // 任意 provider/适配器的边界；适配器不按契约发 chunk（第三方 provider 的 finish
@@ -1159,34 +1256,57 @@ export default {
           const kind = chunk.reason && chunk.reason.kind ? chunk.reason.kind : ''
           if (kind === 'error' || kind === 'aborted') {
             const failure = chunk.reason.failure && chunk.reason.failure.message ? chunk.reason.failure.message : kind
-            throw new Error('flash 调用失败: ' + failure)
+            const error = new Error('flash 调用失败: ' + failure)
+            // 保留适配器失败的 code（UNSUPPORTED_REASONING_EFFORT / MISSING_CREDENTIAL …）：
+            // 只带 code、或措辞不同的失败，只能靠 code 被 isUnsupportedEffort 认出来。
+            if (chunk.reason.failure && chunk.reason.failure.code) error.code = chunk.reason.failure.code
+            throw error
           }
         }
+      }
+      // 只有思考文本、没有正文 = 判定器没给出结论：按失败处理（fail-safe 转人工），
+      // 而不是把思考过程当结论（宁可转人工，也不据思考文本自动放行）。
+      if (text.trim() === '' && reasoningText !== '') {
+        throw new Error(`flash 只返回思考文本（${reasoningText.length} 字符），没有判定正文`)
       }
       return text
     }
 
+    // 完全不接受任何显式 reasoningEffort 的路由（命中一次即记住）
+    const noEffortRoutes = new Set()
+
     const callFlash = async (userText, systemPrompt, signal) => {
       const { provider, model } = resolveModel()
       const key = provider + '/' + model
-      const cached = flashLevelCache.get(key)
-      // 缓存档位走快路径；其余仍按从低到高兜底（模型或配置变了也能自愈）
-      const order = cached === undefined ? THINKING_LEVELS : [cached].concat(THINKING_LEVELS.filter((l) => l !== cached))
-      let lastError = null
-      for (const effort of order) {
-        try {
-          const text = await callFlashOnce(provider, model, effort, userText, systemPrompt, signal)
-          if (cached !== effort) {
-            flashLevelCache.set(key, effort)
-            console.warn(`[${NAME}] 判定思考档位 ${key} → ${effort}（该模型声明的最低可用档）`)
+      if (!noEffortRoutes.has(key)) {
+        const cached = flashLevelCache.get(key)
+        // 缓存档位走快路径；其余仍按从低到高兜底（模型或配置变了也能自愈）
+        const order = cached === undefined ? THINKING_LEVELS : [cached].concat(THINKING_LEVELS.filter((l) => l !== cached))
+        let lastError = null
+        for (const effort of order) {
+          try {
+            const text = await callFlashOnce(provider, model, effort, userText, systemPrompt, signal)
+            if (cached !== effort) {
+              flashLevelCache.set(key, effort)
+              console.warn(`[${NAME}] 判定思考档位 ${key} → ${effort}（该模型声明的最低可用档）`)
+            }
+            return text
+          } catch (error) {
+            if (!isUnsupportedEffort(error)) throw error
+            lastError = error
           }
-          return text
-        } catch (error) {
-          if (!isUnsupportedEffort(error)) throw error
-          lastError = error
         }
+        // 走到这里 = 该路由拒绝了所有显式档位。这不是「最低档是 max」，而是该 model 根本没声明
+        // reasoning 能力：dsh-llm resolveCallWithInfo 在 reasoning === undefined 时对「任何显式
+        // effort」都抛 UNSUPPORTED_REASONING_EFFORT（pi-ai 的 reasoningInfo() 对没有思考元数据的
+        // 模型直接省略整个 reasoning 字段）。此时唯一可用的调用方式是「不带 reasoningEffort」
+        // （用路由默认档）。实测：旧实现 7 档 × 重试 2 次全部被拒 → 判定器永久失效，
+        // 每次审批都转人工（test/judge/run.mjs S1：base 变体 14 次调用无一成功）。
+        console.warn(`[${NAME}] 路由 ${key} 不接受显式思考档位（${lastError ? String(lastError.message || lastError).slice(0, 80) : 'unknown'}），改用不带 reasoningEffort 的调用`)
       }
-      throw lastError || new Error('flash 调用失败: 没有可用的思考档位')
+      const text = await callFlashOnce(provider, model, undefined, userText, systemPrompt, signal)
+      noEffortRoutes.add(key)
+      return text
     }
 
     /**
@@ -1366,13 +1486,15 @@ export default {
         const filesOpt = toolFiles ? { files: toolFiles, baseDir: sessionCwd } : { baseDir: sessionCwd }
 
         // 转人工统一处理：记录 pending → 交下游（web answerer）→ 记录终态事件（关闭提示条）
-        const forwardToHuman = async (sid, tName, tMode, rsn, jst, cat, why) => {
-          recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-pending', Object.assign({ kind: 'manual-pending', category: cat || '', path: why }, filesOpt))
+        // extra：附加到事件上的诊断字段（如 judgeError），供审查 API 与排障读取
+        const forwardToHuman = async (sid, tName, tMode, rsn, jst, cat, why, extra) => {
+          const diagnostics = extra || {}
+          recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-pending', Object.assign({ kind: 'manual-pending', category: cat || '', path: why }, filesOpt, diagnostics))
           const out = await next()
           if (out === 'allowed-once') {
-            recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-approved', Object.assign({ kind: 'manual-approved', category: cat || '', path: why }, filesOpt))
+            recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-approved', Object.assign({ kind: 'manual-approved', category: cat || '', path: why }, filesOpt, diagnostics))
           } else if (out === 'rejected') {
-            recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-rejected', Object.assign({ kind: 'manual-rejected', category: cat || '', path: why }, filesOpt))
+            recordApprovalEvent(sid, tName, tMode, rsn, jst, 'manual-rejected', Object.assign({ kind: 'manual-rejected', category: cat || '', path: why }, filesOpt, diagnostics))
           }
           return out
         }
@@ -1406,7 +1528,7 @@ export default {
         if (failed) {
           const why = judgeError ? `${errText(judgeError).slice(0, 200)} || ` : ''
           audit(`FAILED  ${toolName} mode=${mode || 'none'} → 人工 | ${why}${reason.slice(0, 120)}`)
-          return forwardToHuman(sessionId, toolName, mode, reason, justification, cat, 'flash-failed')
+          return forwardToHuman(sessionId, toolName, mode, reason, justification, cat, 'flash-failed', judgeError ? { judgeError: String(judgeError) } : undefined)
         }
 
         // 4b. 硬风险类别（deletion/credential/remote/system/bulk）→ 直接转人工（必须人工确认，不计数不学习）
